@@ -10,6 +10,7 @@ struct AVLNode<T: Ord> {
   value: T,
   height: usize,
   size: usize,
+  count: usize,
   left: Option<Box<AVLNode<T>>>,
   right: Option<Box<AVLNode<T>>>,
 }
@@ -45,7 +46,7 @@ impl<T: Ord> AVLTree<T> {
     let mut current = &self.root;
     while let Some(node) = current {
       current = match value.cmp(&node.value) {
-        Ordering::Equal => return true,
+        Ordering::Equal => return node.count > 0,
         Ordering::Less => &node.left,
         Ordering::Greater => &node.right,
       }
@@ -54,14 +55,9 @@ impl<T: Ord> AVLTree<T> {
   }
 
   /// Adds a value to the tree.
-  ///
-  /// Returns `true` if the tree did not yet contain the value.
-  pub fn insert(&mut self, value: T) -> bool {
-    let inserted = insert(&mut self.root, value);
-    if inserted {
-      self.length += 1;
-    }
-    inserted
+  pub fn insert(&mut self, value: T) {
+    insert(&mut self.root, value);
+    self.length += 1;
   }
 
   /// Removes a value from the tree.
@@ -102,7 +98,7 @@ impl<T: Ord> AVLTree<T> {
         }
         Ordering::Less => current = &node.left,
         Ordering::Greater => {
-          rank += 1;
+          rank += node.count;
           if let Some(left) = &node.left {
             rank += left.size;
           }
@@ -127,10 +123,10 @@ impl<T: Ord> AVLTree<T> {
       let left_size = node.left.as_ref().map_or(0, |n| n.size);
       if rank < left_size {
         current = &node.left;
-      } else if rank == left_size {
+      } else if rank < left_size + node.count {
         return Some(&node.value);
       } else {
-        rank -= left_size + 1;
+        rank -= left_size + node.count;
         current = &node.right;
       }
     }
@@ -146,7 +142,7 @@ impl<T: Ord> AVLTree<T> {
     // Initialize stack with path to leftmost child
     let mut child = &self.root;
     while let Some(node) = child {
-      node_iter.stack.push(node.as_ref());
+      node_iter.stack.push((node.as_ref(), node.count));
       child = &node.left;
     }
     node_iter
@@ -161,27 +157,24 @@ impl<T: Ord> AVLTree<T> {
 }
 
 /// Recursive helper function for `AVLTree` insertion.
-fn insert<T: Ord>(tree: &mut Option<Box<AVLNode<T>>>, value: T) -> bool {
+fn insert<T: Ord>(tree: &mut Option<Box<AVLNode<T>>>, value: T) {
   if let Some(node) = tree {
-    let inserted = match value.cmp(&node.value) {
-      Ordering::Equal => false,
+    match value.cmp(&node.value) {
+      Ordering::Equal => node.count += 1,
       Ordering::Less => insert(&mut node.left, value),
       Ordering::Greater => insert(&mut node.right, value),
     };
-    if inserted {
-      node.size += 1;
-      node.rebalance();
-    }
-    inserted
+    node.size += 1;
+    node.rebalance();
   } else {
     *tree = Some(Box::new(AVLNode {
       value,
       height: 1,
       size: 1,
+      count: 1,
       left: None,
       right: None,
     }));
-    true
   }
 }
 
@@ -192,6 +185,11 @@ fn remove<T: Ord>(tree: &mut Option<Box<AVLNode<T>>>, value: &T) -> bool {
       Ordering::Less => remove(&mut node.left, value),
       Ordering::Greater => remove(&mut node.right, value),
       Ordering::Equal => {
+        if node.count > 1 {
+          node.count -= 1;
+          node.size -= 1;
+          return true;
+        }
         *tree = match (node.left.take(), node.right.take()) {
           (None, None) => None,
           (Some(b), None) | (None, Some(b)) => Some(b),
@@ -220,7 +218,7 @@ fn merge<T: Ord>(
   let mut root = take_min(&mut op_right).unwrap();
   root.left = Some(left);
   root.right = op_right;
-  root.size = 1
+  root.size = root.count
     + root.left.as_ref().map_or(0, |n| n.size)
     + root.right.as_ref().map_or(0, |n| n.size);
   root.rebalance();
@@ -284,7 +282,7 @@ impl<T: Ord> AVLNode<T> {
   /// Recomputes the `height` and `size` fields.
   fn update_height_and_size(&mut self) {
     self.height = 1 + max(self.height(Side::Left), self.height(Side::Right));
-    self.size = 1
+    self.size = self.count
       + self.left.as_ref().map_or(0, |n| n.size)
       + self.right.as_ref().map_or(0, |n| n.size);
   }
@@ -346,24 +344,26 @@ impl<T: Ord> FromIterator<T> for AVLTree<T> {
 ///
 /// This struct is created by the `node_iter` method of `AVLTree`.
 struct NodeIter<'a, T: Ord> {
-  stack: Vec<&'a AVLNode<T>>,
+  stack: Vec<(&'a AVLNode<T>, usize)>,
 }
 
 impl<'a, T: Ord> Iterator for NodeIter<'a, T> {
   type Item = &'a AVLNode<T>;
 
   fn next(&mut self) -> Option<Self::Item> {
-    if let Some(node) = self.stack.pop() {
+    while let Some((node, count)) = self.stack.pop() {
+      if count > 0 {
+        self.stack.push((node, count - 1));
+        return Some(node);
+      }
       // Push left path of right subtree to stack
       let mut child = &node.right;
       while let Some(subtree) = child {
-        self.stack.push(subtree.as_ref());
+        self.stack.push((subtree.as_ref(), subtree.count));
         child = &subtree.left;
       }
-      Some(node)
-    } else {
-      None
     }
+    None
   }
 }
 
@@ -413,9 +413,11 @@ mod tests {
   fn insert() {
     let mut tree = AVLTree::new();
     // First insert succeeds
-    assert!(tree.insert(1));
+    tree.insert(1);
     // Second insert fails
-    assert!(!tree.insert(1));
+    tree.insert(1);
+    assert!(tree.contains(&1));
+    assert_eq!(tree.iter().cloned().collect::<Vec<_>>(), vec![1, 1]);
   }
 
   #[test]
@@ -474,5 +476,30 @@ mod tests {
     assert_eq!(tree.select(10), Some(&27));
     assert_eq!(tree.select(2), Some(&3));
     assert_eq!(tree.select(7), Some(&17));
+  }
+
+  #[test]
+  fn select_dups() {
+    let mut tree: AVLTree<_> = (1..8).collect();
+    for x in 1..8 {
+      tree.insert(x)
+    }
+    for x in 1..8 {
+      tree.insert(x)
+    }
+    assert_eq!(tree.select(0 * 3), Some(&(1)));
+    assert_eq!(tree.select(0 * 3 + 1), Some(&(1)));
+    assert_eq!(tree.select(3 * 3), Some(&(4)));
+    assert_eq!(tree.select(3 * 3 + 1), Some(&(4)));
+    assert_eq!(tree.select(3 * 3 + 2), Some(&(4)));
+    assert_eq!(tree.select(6 * 3), Some(&(7)));
+    assert_eq!(tree.select(6 * 3 + 2), Some(&(7)));
+    assert_eq!(tree.select(6 * 3 + 3), None);
+    assert_eq!(tree.select(7 * 3), None);
+    tree.remove(&4);
+    assert_eq!(tree.select(3 * 3 + 1), Some(&(4)));
+    assert_eq!(tree.select(3 * 3 + 2), Some(&(5)));
+    assert_eq!(tree.select(6 * 3 + 1), Some(&(7)));
+    assert_eq!(tree.select(6 * 3 + 2), None);
   }
 }

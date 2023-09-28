@@ -23,8 +23,14 @@ impl PyAVLTree {
     }
   }
 
-  fn insert(&mut self, value: f64) -> bool {
+  fn insert(&mut self, value: f64) {
     self.tree.insert(value.into())
+  }
+
+  fn insert_all(&mut self, values: Vec<f64>) {
+    for v in values {
+      self.tree.insert(v.into());
+    }
   }
 
   fn remove(&mut self, value: f64) -> bool {
